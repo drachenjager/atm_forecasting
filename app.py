@@ -33,7 +33,7 @@ with st.sidebar:
     )
 
     st.header("2) Serie temporal")
-    freq = st.selectbox("Frecuencia de agregación", options=["D", "W", "M"], index=0)
+    freq = st.selectbox("Frecuencia de agregación", options=["D", "H", "W", "M"], index=0)
     fill_missing = st.selectbox("Tratamiento de faltantes", options=["zeros", "ffill", "interpolate"], index=0)
 
     st.header("3) Entrenamiento / evaluación")
@@ -145,6 +145,20 @@ if mode == "Transacciones (serie temporal: suma de monto)":
             freq=freq,
             fill_missing=fill_missing,
         )
+        if len(series_df) <= 1 and freq in {"D", "W", "M"}:
+            timestamps = pd.to_datetime(df_main[date_col], errors="coerce").dropna()
+            if not timestamps.empty and timestamps.dt.floor("D").nunique() == 1 and timestamps.dt.hour.nunique() > 1:
+                st.info("Detecté datos intradía en una sola fecha. Ajusté la frecuencia a horas (H) para graficar.")
+                freq = "H"
+                series_df = build_series_sum(
+                    df=df_main,
+                    date_col=date_col,
+                    target_col=target_col,
+                    group_col=group_col,
+                    group_value=group_value,
+                    freq=freq,
+                    fill_missing=fill_missing,
+                )
         series_label = f"Suma de {target_col}"
     except Exception as e:
         st.error(f"No pude construir la serie temporal. Detalle: {e}")
@@ -216,6 +230,21 @@ else:
             freq=freq,
             fill_missing=fill_missing,
         )
+        if len(series_df) <= 1 and freq in {"D", "W", "M"}:
+            timestamps = pd.to_datetime(df_events[date_col_e], errors="coerce").dropna()
+            if not timestamps.empty and timestamps.dt.floor("D").nunique() == 1 and timestamps.dt.hour.nunique() > 1:
+                st.info("Detecté datos intradía en una sola fecha. Ajusté la frecuencia a horas (H) para graficar.")
+                freq = "H"
+                series_df = build_series_count(
+                    df=df_events,
+                    date_col=date_col_e,
+                    event_col=event_col_e,
+                    event_value=str(chosen_code),
+                    group_col=group_col_e,
+                    group_value=group_value_e,
+                    freq=freq,
+                    fill_missing=fill_missing,
+                )
         series_label = f"Conteo de error {chosen_code}" + (f" ({chosen_desc})" if chosen_desc else "")
     except Exception as e:
         st.error(f"No pude construir la serie de eventos. Detalle: {e}")
@@ -228,18 +257,34 @@ st.plotly_chart(fig_hist, use_container_width=True)
 if len(series_df) < (int(test_size) + 30):
     st.warning("Pocos datos para el test seleccionado. Considera reducir test_size o cargar más historial.")
 
+if len(series_df) < 3:
+    st.error("La serie temporal tiene muy pocos puntos para entrenar un modelo. Ajusta la frecuencia o carga más historial.")
+    st.stop()
+
+test_size_eff = int(test_size)
+max_test_size = max(1, len(series_df) - 2)
+if test_size_eff > max_test_size:
+    st.warning(f"test_size ajustado automáticamente a {max_test_size} por falta de datos.")
+    test_size_eff = max_test_size
+
+horizon_eff = int(horizon)
+max_horizon = max(1, len(series_df))
+if horizon_eff > max_horizon:
+    st.warning(f"Horizonte ajustado automáticamente a {max_horizon} por falta de datos.")
+    horizon_eff = max_horizon
+
 run = st.button("Entrenar y pronosticar", type="primary")
 if not run:
     st.stop()
 
 y = series_df["y"].copy()
 
-if int(test_size) >= len(y) - 10:
+if test_size_eff >= len(y):
     st.error("test_size es demasiado grande para el tamaño de la serie. Reduce test_size.")
     st.stop()
 
-y_train = y.iloc[:-int(test_size)]
-y_test = y.iloc[-int(test_size):]
+y_train = y.iloc[:-test_size_eff]
+y_test = y.iloc[-test_size_eff:]
 
 if model_name == "Auto-ARIMA (pmdarima)":
     model = AutoARIMAModel(**params)
@@ -265,7 +310,7 @@ with st.spinner("Entrenando y evaluando..."):
     st.json(metrics)
 
     model.fit(y)
-    future_fcst = model.predict(n_periods=int(horizon), last_date=y.index[-1], freq=freq)
+    future_fcst = model.predict(n_periods=horizon_eff, last_date=y.index[-1], freq=freq)
 
 st.subheader("Pronóstico sobre test y futuro")
 fig_tt = plot_train_test_forecast(
@@ -273,7 +318,7 @@ fig_tt = plot_train_test_forecast(
     y_test=y_test,
     yhat_test=test_pred.reset_index().rename(columns={"index": "ds"}),
     yhat_future=future_fcst,
-    title=f"{model_name} | {series_label} | test={int(test_size)} | horizonte={int(horizon)}",
+    title=f"{model_name} | {series_label} | test={test_size_eff} | horizonte={horizon_eff}",
 )
 st.plotly_chart(fig_tt, use_container_width=True)
 
